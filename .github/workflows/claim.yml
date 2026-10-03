@@ -1,32 +1,50 @@
 name: knos claim
 
-# How a GitHub account names the Solana address its Knos payments go to. Called as a reusable workflow from a
-# repository named `knos-claim` that the account owns (the template drexthealpha/knos-claim makes one in a click;
-# `knos claim <address>` makes one from a terminal).
+# How a GitHub account, or a GitHub organisation, names the Solana address its Knos payments go to. Called as a
+# reusable workflow from a repository named `knos-claim` that the account or organisation owns (the template
+# drexthealpha/knos-claim makes one in a click; `knos claim <address>` makes one from a terminal).
 #
 # It asks GitHub for an OIDC token whose audience is
 #
-#     knos2:bind:<solana address>
+#     knos2:bind:<solana address>      kind user (the default): a personal account
+#     knos3:bind:<solana address>      kind org: an organisation
 #
 # and posts it on an issue in the calling repository for a relayer to carry to Solana (Knos's always-on worker does;
 # anyone can). knos-pay accepts a bind token only if GitHub's signature says all of this:
 #
 #   - the job ran THIS file at THIS commit (job_workflow_ref, job_workflow_sha), on a GitHub-hosted runner;
-#   - the run was started by the owner of the repository it ran in (actor_id == repository_owner_id);
 #   - that repository is named knos-claim;
 #   - it was started by hand (workflow_dispatch), with the address typed into the form. No link can fill that form in
-#     for you, so nobody can get you to name their address with one click.
+#     for you, so nobody can get you to name their address with one click;
+#   - kind user: the run was started by the owner of the repository it ran in (actor_id == repository_owner_id), so
+#     the repository is a personal account's and the account is the one that is paid;
+#   - kind org: the repository's owner is not the person who started the run (repository_owner_id != actor_id), so it
+#     is an organisation's, and the organisation is the one that is paid.
 #
-# Nobody else can get GitHub to sign that for your account, so nobody else can choose where your money goes.
+# Nobody else can get GitHub to sign that for a personal account, so nobody else can choose where its money goes.
+# For an organisation, see the next paragraph.
+#
+# Who can bind an organisation's wallet: anyone who can start a workflow by hand in the organisation's knos-claim
+# repository. GitHub allows that to everyone with write access to it, not only to owners. GitHub's signature says that
+# the run was in the organisation's repository and who started it, and knos-pay does not tell members apart, so any
+# of them can name the address. A later run replaces the address an earlier one named. So an organisation should give
+# write access to its knos-claim repository only to people it trusts with where its payments go. A run of kind org in
+# a personal account's repository, or of kind user in an organisation's, is refused by knos-pay.
+#
 # The token names one address and nothing else. This file takes no secret and is never changed: another commit is
 # another sha, which the program does not accept.
 on:
   workflow_call:
     inputs:
       address:
-        description: Solana address that receives this GitHub account's Knos payments
+        description: Solana address that receives this GitHub account's (or organisation's) Knos payments
         required: true
         type: string
+      kind:
+        description: "user for a personal account's repository, org for an organisation's"
+        required: false
+        type: string
+        default: user
       relay-log:
         description: repository whose public relay log reports what happened to the token
         required: false
@@ -46,6 +64,7 @@ jobs:
       - name: ask GitHub for the token, post it, wait for a relayer
         env:
           ADDRESS: ${{ inputs.address }}
+          KIND: ${{ inputs.kind }}
           LOG_REPO: ${{ inputs.relay-log }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -57,6 +76,7 @@ jobs:
           repo = os.environ["GITHUB_REPOSITORY"]
           address = os.environ["ADDRESS"].strip()
           log_repo = os.environ.get("LOG_REPO") or "drexthealpha/Knos"
+          kind = os.environ.get("KIND") or "user"
 
           def is_address(s):
               """A canonical base58 32-byte public key, as Solana prints one."""
@@ -84,11 +104,14 @@ jobs:
               sys.exit(f"{address!r} is not a Solana address")
           if not re.fullmatch(r"[\w.-]+/[\w.-]+", log_repo):
               sys.exit("relay-log is not owner/name")
-          aud = "knos2:bind:" + address
+          if kind not in ("user", "org"):
+              sys.exit("kind is user or org")
+          aud = ("knos3:bind:" if kind == "org" else "knos2:bind:") + address
           tok = call(os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=" + urllib.parse.quote(aud, safe=""),
                      headers={"Authorization": "bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]})["value"]
           tid = hashlib.sha256(tok.encode()).hexdigest()[:16]
-          issue = call(f"{API}/repos/{repo}/issues", {"title": "knos claim", "body": f"Knos payments for this GitHub account go to `{address}`."})
+          who = "organisation" if kind == "org" else "account"
+          issue = call(f"{API}/repos/{repo}/issues", {"title": "knos claim", "body": f"Knos payments for this GitHub {who} go to `{address}`."})
           n = issue["number"]
           call(f"{API}/repos/{repo}/issues/{n}/comments",
                {"body": f"knos-bind: {tok}\n\n<sub>knosrelay: a GitHub-signed token that can only name {address}. Anyone can carry it to Solana.</sub>"})
