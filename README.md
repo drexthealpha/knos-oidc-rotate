@@ -1,25 +1,39 @@
 # knos-oidc-rotate
 
-One workflow, [`rotate.yml`](.github/workflows/rotate.yml). It is how a new GitHub Actions or GitLab CI signing key
-becomes trusted by [knos-oidc](https://github.com/drexthealpha/Knos), the Solana program that verifies those issuers'
-OIDC tokens on chain with no admin.
+Two workflows that the [Knos](https://github.com/drexthealpha/Knos) programs on Solana name by commit sha. A commit
+sha fixes a file's content, so what these workflows do cannot be changed without the programs refusing the result.
 
-knos-oidc has this repository, the workflow's path and its commit sha fixed in its (immutable) binary. Every six
-hours the workflow reads the issuers' public key sets and asks GitHub to sign a token naming each key's hash. knos-oidc accepts
-a new key only on such a token, signed by a GitHub key it already trusts. Nobody, Knos included, can add a key any
-other way, and this file can never change: another commit is another sha, which the program does not accept.
+## [`rotate.yml`](.github/workflows/rotate.yml): issuer keys
 
-Anyone can run it. From any repository:
+knos-oidc verifies GitHub Actions and GitLab CI tokens on chain. It has to learn the keys those issuers sign with.
+This workflow reads both issuers' public key sets on a GitHub-hosted runner and asks GitHub to sign a token naming
+each key's hash. A key reaches the program only on such a token, signed by a GitHub key it already trusts.
+
+- The first deployment (immutable) accepts the token from any repository that calls this file at the pinned commit.
+- The second deployment also requires GitHub's signature to say the run happened in a repository of this account
+  (`repository_id` and `repository_owner_id`), then holds the key for a day in public view, needs the guardian's
+  approval, and lets every key expire unless this workflow names it again. The guardian can remove a key and can
+  never add one.
+
+## [`claim.yml`](.github/workflows/claim.yml): where an account is paid
+
+A GitHub account names the Solana address its Knos payments go to by running this file from a repository named
+`knos-claim` that it owns. knos-pay accepts the token only from this file at the pinned commit, from a run started
+by hand (`workflow_dispatch`) by the owner of the repository it ran in. Nobody else can get GitHub to sign that for
+your account.
 
 ```yaml
-on: { schedule: [{ cron: "7 3 * * *" }], workflow_dispatch: }
+# .github/workflows/claim.yml in <you>/knos-claim
+on:
+  workflow_dispatch:
+    inputs: { address: { description: Solana address, required: true, type: string } }
+permissions: {}
 jobs:
-  keys:
+  claim:
     permissions: { id-token: write, issues: write }
-    uses: drexthealpha/knos-oidc-rotate/.github/workflows/rotate.yml@<the commit knos-oidc pins>
+    uses: drexthealpha/knos-oidc-rotate/.github/workflows/claim.yml@<the commit knos-pay pins>
+    with: { address: "${{ inputs.address }}" }
 ```
 
-The token GitHub signs names this file at that commit whoever calls it, so rotation does not depend on this
-repository, or on Knos, staying around.
-
-MIT licence.
+Neither workflow takes a secret. Both post the tokens in public: each names one key hash or one address and nothing
+else, and a relayer who carries it only pays the fee.
